@@ -1,0 +1,55 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Firewalla MSP",
+        "description": "Use your MSP domain (e.g. yourname.firewalla.net) and a personal access token from MSP → Account Settings → API.",
+        "data": {
+          "msp_domain": "MSP domain",
+          "token": "Personal access token"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-enter Firewalla MSP token",
+        "description": "The stored token was rejected. Paste a new personal access token.",
+        "data": { "token": "Personal access token" }
+      }
+    },
+    "error": {
+      "invalid_auth": "The token was rejected.",
+      "cannot_connect": "Could not reach the MSP domain.",
+      "no_boxes": "Connected, but no Firewalla boxes are linked to this MSP account."
+    },
+    "abort": {
+      "already_configured": "This MSP domain is already set up.",
+      "reauth_successful": "Token updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Firewalla MSP options",
+        "data": {
+          "scan_interval": "Poll interval",
+          "tracked_devices": "Devices to track online/offline"
+        },
+        "data_description": {
+          "tracked_devices": "Each selected device gets a connectivity sensor, useful for gateways and hubs (Powerwall, Platinum, Homebridge, Starling)."
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "box_online": { "name": "Online" }
+    },
+    "sensor": {
+      "active_alarms": { "name": "Active alarms" },
+      "devices_online": { "name": "Devices online" },
+      "devices_offline": { "name": "Devices offline" },
+      "public_ip": { "name": "Public IP" },
+      "firmware": { "name": "Firmware" },
+      "latest_alarm": { "name": "Latest alarm" }
+    }
+  }
+}
