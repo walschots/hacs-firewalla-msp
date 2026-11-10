@@ -36,6 +36,12 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Back-off state per config entry, kept outside the coordinator so it survives
+# setup retries (HA builds a new coordinator on every ConfigEntryNotReady retry,
+# roughly every 80 s, which would otherwise ignore the back-off and keep the
+# MSP rate limit tripped). Values: (backoff_until monotonic, last delay in s).
+_BACKOFF: dict[str, tuple[float, float]] = {}
+
 
 def _to_int(value: Any, default: int = 0) -> int:
     try:
@@ -91,9 +97,9 @@ class FirewallaCoordinator(DataUpdateCoordinator[FirewallaData]):
         # Monotonic timestamps of the last successful slow-cadence fetches.
         self._boxes_fetched: float | None = None
         self._rules_fetched: float | None = None
-        # Rate-limit back-off state.
-        self._backoff_until = 0.0
-        self._backoff = 0.0
+        # Rate-limit back-off state (restored across setup retries).
+        self._entry_id = entry.entry_id
+        self._backoff_until, self._backoff = _BACKOFF.get(self._entry_id, (0.0, 0.0))
 
     def request_rules_refresh(self) -> None:
         """Fetch rules on the next poll (after a rule was paused/resumed)."""
@@ -106,6 +112,7 @@ class FirewallaCoordinator(DataUpdateCoordinator[FirewallaData]):
             delay = min(self._backoff * 2 if self._backoff else BACKOFF_INITIAL, BACKOFF_MAX)
         self._backoff = delay
         self._backoff_until = time.monotonic() + delay
+        _BACKOFF[self._entry_id] = (self._backoff_until, self._backoff)
         return delay
 
     async def _async_update_data(self) -> FirewallaData:
@@ -116,7 +123,8 @@ class FirewallaCoordinator(DataUpdateCoordinator[FirewallaData]):
             if prev is not None:
                 # Still backing off: keep entities on their last known values.
                 return prev
-            raise UpdateFailed("Rate limited by Firewalla MSP; waiting before retrying")
+            wait = int(self._backoff_until - now)
+            raise UpdateFailed(f"Rate limited by Firewalla MSP; next try in {wait} s")
 
         boxes = prev.boxes if prev else {}
         devices = prev.devices if prev else {}
@@ -170,7 +178,10 @@ class FirewallaCoordinator(DataUpdateCoordinator[FirewallaData]):
         except FirewallaApiError as err:
             raise UpdateFailed(str(err)) from err
 
-        self._backoff = 0.0  # a clean poll resets the back-off
+        # A clean poll resets the back-off.
+        self._backoff = 0.0
+        self._backoff_until = 0.0
+        _BACKOFF.pop(self._entry_id, None)
 
         data = FirewallaData(
             boxes=boxes,
