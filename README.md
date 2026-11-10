@@ -31,7 +31,7 @@ Alarm types: 1 Security Activity · 2 Abnormal Upload · 3 Large Bandwidth · 4 
 2. Download **Firewalla MSP**, restart Home Assistant.
 3. Settings → Devices & services → Add integration → **Firewalla MSP**.
 4. Enter your MSP domain (`yourname.firewalla.net`) and a token from MSP → Account Settings → API.
-5. Open **Configure** to pick devices to track and set the poll interval (default 60 s).
+5. Open **Configure** to pick devices to track and set the poll interval (default 120 s, minimum 60 s).
 
 ## Example automations
 
@@ -122,7 +122,8 @@ sequence:
 - **Rules need MSP 2.7.0+.** If `GET /v2/rules` fails, the integration logs a warning and skips rule switches; everything else keeps working.
 - **Rule IDs change if a rule is edited** (the API has no edit endpoint, so edits recreate the rule). The old switch becomes unavailable and a new one appears disabled. Reference rules by entity in automations and re-point after edits.
 - Pause has no duration in the official API; a paused rule stays paused until resumed. Use a script with a delay (above).
-- Polling every 60 s means alarms arrive within about a minute, not instantly.
+- Polling every 120 s means alarms arrive within about two minutes, not instantly.
+- Rate limits: alarms and devices are polled every interval, boxes every 10 minutes and rules every 30 minutes (or right after you toggle a rule). On HTTP 429 the integration backs off (honouring `Retry-After`, otherwise 2 → 4 → … → 30 minutes) and keeps the last known values instead of going unavailable.
 - The token is stored in the HA config entry. If it's revoked, HA prompts you to re-authenticate.
 
 ## License

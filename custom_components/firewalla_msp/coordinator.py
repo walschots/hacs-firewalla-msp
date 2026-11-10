@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import timedelta
 import logging
+import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -11,15 +12,25 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import FirewallaApiError, FirewallaAuthError, FirewallaMspClient
+from .api import (
+    FirewallaApiError,
+    FirewallaAuthError,
+    FirewallaMspClient,
+    FirewallaRateLimitError,
+)
 from .const import (
     ALARM_FETCH_LIMIT,
     ALARM_STATUS_ACTIVE,
     ALARM_TYPES,
+    BACKOFF_INITIAL,
+    BACKOFF_MAX,
+    BOXES_INTERVAL,
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     EVENT_ALARM,
+    MIN_SCAN_INTERVAL,
+    RULES_INTERVAL,
     WAN_STATUS,
 )
 
@@ -64,7 +75,9 @@ class FirewallaCoordinator(DataUpdateCoordinator[FirewallaData]):
     """Fetch boxes, devices, rules and alarms; fire an event per new alarm."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, client: FirewallaMspClient) -> None:
-        interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+        interval = max(
+            int(entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)), MIN_SCAN_INTERVAL
+        )
         super().__init__(
             hass,
             _LOGGER,
@@ -75,31 +88,94 @@ class FirewallaCoordinator(DataUpdateCoordinator[FirewallaData]):
         self.client = client
         self._seen_alarms: set[tuple[str, str]] | None = None
         self._rules_supported = True
+        # Monotonic timestamps of the last successful slow-cadence fetches.
+        self._boxes_fetched: float | None = None
+        self._rules_fetched: float | None = None
+        # Rate-limit back-off state.
+        self._backoff_until = 0.0
+        self._backoff = 0.0
+
+    def request_rules_refresh(self) -> None:
+        """Fetch rules on the next poll (after a rule was paused/resumed)."""
+        self._rules_fetched = None
+
+    def _start_backoff(self, err: FirewallaRateLimitError) -> float:
+        if err.retry_after:
+            delay = min(err.retry_after, BACKOFF_MAX)
+        else:
+            delay = min(self._backoff * 2 if self._backoff else BACKOFF_INITIAL, BACKOFF_MAX)
+        self._backoff = delay
+        self._backoff_until = time.monotonic() + delay
+        return delay
 
     async def _async_update_data(self) -> FirewallaData:
+        now = time.monotonic()
+        prev = self.data
+
+        if now < self._backoff_until:
+            if prev is not None:
+                # Still backing off: keep entities on their last known values.
+                return prev
+            raise UpdateFailed("Rate limited by Firewalla MSP; waiting before retrying")
+
+        boxes = prev.boxes if prev else {}
+        devices = prev.devices if prev else {}
+        alarms = prev.alarms if prev else []
+        rules = prev.rules if prev else {}
+
         try:
-            boxes = await self.client.get_boxes()
-            devices = await self.client.get_devices()
+            if (
+                not boxes
+                or self._boxes_fetched is None
+                or now - self._boxes_fetched >= BOXES_INTERVAL
+            ):
+                boxes = {b["gid"]: b for b in await self.client.get_boxes() if b.get("gid")}
+                self._boxes_fetched = now
+
+            devices = {d["id"]: d for d in await self.client.get_devices() if d.get("id")}
             alarms = await self.client.get_alarms(ALARM_FETCH_LIMIT)
-            rules: list[dict[str, Any]] = []
-            if self._rules_supported:
+
+            if self._rules_supported and (
+                self._rules_fetched is None or now - self._rules_fetched >= RULES_INTERVAL
+            ):
                 try:
-                    rules = await self.client.get_rules()
-                except FirewallaAuthError:
+                    rules = {
+                        str(r["id"]): r
+                        for r in await self.client.get_rules()
+                        if r.get("id") is not None
+                    }
+                    self._rules_fetched = now
+                except (FirewallaAuthError, FirewallaRateLimitError):
                     raise
                 except FirewallaApiError as err:
-                    # GET /v2/rules needs MSP 2.7.0+; keep the rest working without it.
-                    _LOGGER.warning("Rules unavailable, rule switches disabled: %s", err)
-                    self._rules_supported = False
+                    if err.status in (400, 404, 405, 501):
+                        # GET /v2/rules needs MSP 2.7.0+; keep the rest working without it.
+                        _LOGGER.warning("Rules unavailable, rule switches disabled: %s", err)
+                        self._rules_supported = False
+                        rules = {}
+                    else:
+                        # Transient failure: keep the last rules and try again next time.
+                        _LOGGER.debug("Rules fetch failed, keeping last rules: %s", err)
         except FirewallaAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
+        except FirewallaRateLimitError as err:
+            delay = self._start_backoff(err)
+            if prev is not None:
+                _LOGGER.warning(
+                    "Firewalla MSP rate limit hit; pausing polls for %d s and keeping last data",
+                    delay,
+                )
+                return prev
+            raise UpdateFailed(f"{err}; retrying in {int(delay)} s") from err
         except FirewallaApiError as err:
             raise UpdateFailed(str(err)) from err
 
+        self._backoff = 0.0  # a clean poll resets the back-off
+
         data = FirewallaData(
-            boxes={b["gid"]: b for b in boxes if b.get("gid")},
-            devices={d["id"]: d for d in devices if d.get("id")},
-            rules={str(r["id"]): r for r in rules if r.get("id") is not None},
+            boxes=boxes,
+            devices=devices,
+            rules=rules if self._rules_supported else {},
             alarms=alarms,
             rules_supported=self._rules_supported,
         )

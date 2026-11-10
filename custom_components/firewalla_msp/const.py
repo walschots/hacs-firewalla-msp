@@ -8,9 +8,18 @@ CONF_TOKEN = "token"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_TRACKED_DEVICES = "tracked_devices"
 
-DEFAULT_SCAN_INTERVAL = 60  # seconds
-MIN_SCAN_INTERVAL = 30
-ALARM_FETCH_LIMIT = 200
+# Alarms and devices are polled every scan_interval. Boxes and rules change
+# rarely, so they're fetched on their own slower cadence. At the defaults this
+# is ~68 requests/hour instead of 240, which keeps clear of the MSP rate limit.
+DEFAULT_SCAN_INTERVAL = 120  # seconds
+MIN_SCAN_INTERVAL = 60
+BOXES_INTERVAL = 600  # seconds
+RULES_INTERVAL = 1800  # seconds
+ALARM_FETCH_LIMIT = 50
+
+# Back-off after HTTP 429 when the server sends no Retry-After header.
+BACKOFF_INITIAL = 120  # seconds
+BACKOFF_MAX = 1800  # seconds
 
 EVENT_ALARM = f"{DOMAIN}_alarm"
 

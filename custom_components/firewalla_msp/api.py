@@ -19,9 +19,30 @@ REQUEST_TIMEOUT = 20
 class FirewallaApiError(Exception):
     """Generic API failure."""
 
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
 
 class FirewallaAuthError(FirewallaApiError):
     """Token rejected (401/403)."""
+
+
+class FirewallaRateLimitError(FirewallaApiError):
+    """HTTP 429: too many requests. retry_after is seconds, if the server said."""
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message, status=429)
+        self.retry_after = retry_after
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(float(value), 0.0)
+    except ValueError:
+        return None  # HTTP-date form; fall back to our own back-off
 
 
 def normalize_domain(value: str) -> str:
@@ -64,11 +85,19 @@ class FirewallaMspClient:
                     method, url, headers=self._headers, params=params
                 ) as resp:
                     if resp.status in (401, 403):
-                        raise FirewallaAuthError(f"Token rejected ({resp.status})")
+                        raise FirewallaAuthError(
+                            f"Token rejected ({resp.status})", status=resp.status
+                        )
+                    if resp.status == 429:
+                        raise FirewallaRateLimitError(
+                            f"{method} {path} rate limited (429)",
+                            retry_after=_parse_retry_after(resp.headers.get("Retry-After")),
+                        )
                     if resp.status >= 400:
                         text = await resp.text()
                         raise FirewallaApiError(
-                            f"{method} {path} failed: {resp.status} {text[:200]}"
+                            f"{method} {path} failed: {resp.status} {text[:200]}",
+                            status=resp.status,
                         )
                     if resp.content_type == "application/json":
                         return await resp.json()

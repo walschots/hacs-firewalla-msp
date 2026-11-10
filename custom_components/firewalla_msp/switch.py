@@ -98,6 +98,7 @@ class FirewallaRuleSwitch(FirewallaBoxEntity, SwitchEntity):
         # Optimistic update, then confirm on next poll.
         self._rule["status"] = "active" if active else "paused"
         self.async_write_ha_state()
+        self.coordinator.request_rules_refresh()
         await self.coordinator.async_request_refresh()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
